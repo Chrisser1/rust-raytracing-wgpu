@@ -44,4 +44,39 @@ impl Camera {
             v1.0 * v2.1 - v1.1 * v2.0,
         )
     }
+
+    // Moves the camera forwards or backwards
+    pub fn move_forwards(&mut self, distance: f32) {
+        self.position.0 += self.forwards.0 * distance;
+        self.position.1 += self.forwards.1 * distance;
+        self.position.2 += self.forwards.2 * distance;
+    }
+
+    // Moves the camera right or left
+    pub fn move_vertical(&mut self, distance: f32) {
+        self.position.0 += self.right.0 * distance;
+        self.position.1 += self.right.1 * distance;
+        self.position.2 += self.right.2 * distance;
+    }
+
+    // Moves the camera up or down
+    pub fn move_horizontal(&mut self, distance: f32) {
+        self.position.0 += self.up.0 * distance;
+        self.position.1 += self.up.1 * distance;
+        self.position.2 += self.up.2 * distance;
+    }
+
+
+
+    // Rotates the camera left or right
+    pub fn rotate_yaw(&mut self, angle: f32) {
+        self.theta += angle;
+        self.recalculate_vectors();
+    }
+
+    // Rotates the camera up or down
+    pub fn rotate_pitch(&mut self, angle: f32) {
+        self.phi = (self.phi + angle).clamp(-89.0, 89.0); // Clamp to prevent flipping
+        self.recalculate_vectors();
+    }
 }

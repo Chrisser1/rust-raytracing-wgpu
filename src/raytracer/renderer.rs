@@ -27,6 +27,8 @@ struct State<'a> {
     sampler: wgpu::Sampler,
     scene_parameters: wgpu::Buffer,
     sphere_buffer: wgpu::Buffer,
+    node_buffer: wgpu::Buffer,
+    sphere_index_buffer: wgpu::Buffer,
 
     // Pipeline Objects
     ray_tracing_pipeline: wgpu::ComputePipeline,
@@ -68,7 +70,6 @@ impl<'a> State<'a> {
             .request_device(&device_descriptor, None)
             .await.unwrap();
 
-
         let surface_capabilities = surface.get_capabilities(&adapter);
         let surface_format = surface_capabilities
             .formats
@@ -93,14 +94,16 @@ impl<'a> State<'a> {
             color_buffer, 
             color_buffer_view, 
             sampler, 
-            scene_parameters,
-            sphere_buffer) = Self::create_assets(&device, &size, &scene).await;
+            scene_parameters, 
+            sphere_buffer, 
+            node_buffer, 
+            sphere_index_buffer) = Self::create_assets(&device, &size, &scene).await;
 
         let (
             ray_tracing_pipeline, 
             ray_tracing_bind_group, 
             screen_pipeline, 
-            screen_bind_group) = Self::make_pipeline(&device, &color_buffer_view, &sampler, &scene_parameters, &sphere_buffer).await;
+            screen_bind_group) = Self::make_pipeline(&device, &color_buffer_view, &sampler, &scene_parameters, &sphere_buffer, &node_buffer, &sphere_index_buffer).await;
         
         Self {
             // Device/Context objects
@@ -116,6 +119,8 @@ impl<'a> State<'a> {
             sampler,
             scene_parameters,
             sphere_buffer,
+            node_buffer,
+            sphere_index_buffer,
             // Pipeline Objects
             ray_tracing_pipeline,
             ray_tracing_bind_group,
@@ -130,7 +135,7 @@ impl<'a> State<'a> {
         device: &wgpu::Device,
         size: &winit::dpi::PhysicalSize<u32>,
         scene: &Scene,
-    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer) {
+    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
         let color_buffer_description = wgpu::TextureDescriptor {
             label: Some("Color Buffer Description"),
             size: wgpu::Extent3d {
@@ -193,8 +198,24 @@ impl<'a> State<'a> {
         };
         let sphere_buffer = device.create_buffer(&sphere_buffer_descriptor);
 
+        let node_buffer_descriptor = wgpu::BufferDescriptor {
+            label: Some("Node Buffer Descriptor"),
+            size: 32u64 * (scene.nodes_used as u64),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        };
+        let node_buffer = device.create_buffer(&node_buffer_descriptor);
+
+        let sphere_index_buffer_descriptor = wgpu::BufferDescriptor {
+            label: Some("Sphere Buffer Descriptor"),
+            size: 4 * scene.spheres.len() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        };
+        let sphere_index_buffer = device.create_buffer(&sphere_index_buffer_descriptor);
+
         // Return the created resources
-        (color_buffer, color_buffer_view, sampler, scene_parameters, sphere_buffer)
+        (color_buffer, color_buffer_view, sampler, scene_parameters, sphere_buffer, node_buffer, sphere_index_buffer)
     }    
 
     async fn make_pipeline(
@@ -203,6 +224,8 @@ impl<'a> State<'a> {
         sampler: &Sampler,
         scene_parameters: &wgpu::Buffer,
         sphere_buffer: &wgpu::Buffer,
+        node_buffer: &wgpu::Buffer,
+        sphere_index_buffer: &wgpu::Buffer,
     ) -> (wgpu::ComputePipeline, wgpu::BindGroup, wgpu::RenderPipeline, wgpu::BindGroup) {
         let ray_tracing_bind_group_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
             label: Some("Ray Bind Group Layout Descriptor"),
@@ -237,6 +260,26 @@ impl<'a> State<'a> {
                     },
                     count: None, // Not an arrayed binding
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { 
+                        ty: wgpu::BufferBindingType::Storage { read_only: true }, 
+                        has_dynamic_offset: false, 
+                        min_binding_size: None,
+                    },
+                    count: None, // Not an arrayed binding
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { 
+                        ty: wgpu::BufferBindingType::Storage { read_only: true }, 
+                        has_dynamic_offset: false, 
+                        min_binding_size: None,
+                    },
+                    count: None, // Not an arrayed binding
+                },
             ],
         };
         let ray_tracing_bind_group_layout = device.create_bind_group_layout(&ray_tracing_bind_group_layout_descriptor);
@@ -261,6 +304,22 @@ impl<'a> State<'a> {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(BufferBinding {
                         buffer: sphere_buffer,
+                        offset: 0,
+                        size: None, // Use the entire buffer
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(BufferBinding {
+                        buffer: node_buffer,
+                        offset: 0,
+                        size: None, // Use the entire buffer
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(BufferBinding {
+                        buffer: sphere_index_buffer,
                         offset: 0,
                         size: None, // Use the entire buffer
                     }),
@@ -509,6 +568,25 @@ impl<'a> State<'a> {
             0, // Offset within the buffer
             &sphere_data_bytes, // The byte slice containing the sphere data
         );
+        
+        // Get node data in bytes
+        let node_data_bytes = self.scene.flatten_node_data();
+        // Write to the buffer
+        self.queue.write_buffer(
+            &self.node_buffer, // The wgpu::Buffer for node data
+            0, // Offset within the buffer
+            &node_data_bytes, // The byte slice containing the node data
+        );
+
+        // Get node data in bytes
+        let sphere_index_data_bytes = self.scene.flatten_sphere_index_data();
+        
+        // Write to the buffer
+        self.queue.write_buffer(
+            &self.sphere_index_buffer, // The wgpu::Buffer for sphere_index data
+            0, // Offset within the buffer
+            &sphere_index_data_bytes, // The byte slice containing the sphere_index data
+        );
     }
 }
 
@@ -531,30 +609,57 @@ pub async fn run() {
         event_loop_proxy.send_event(CustomEvent::Timer).ok();
     });
 
-    let mut state = State::new(&window, Scene::new(64)).await;
+    let mut program_state: State<'_> = State::new(&window, Scene::new(81400)).await;
 
     event_loop.run(move | event, elwt | match event {
         Event::UserEvent(..) => {
-            state.window.request_redraw();
+            program_state.window.request_redraw();
+            program_state.scene.update();
         },
 
-        Event::WindowEvent { window_id, ref event } if window_id == state.window.id() => match event {
-
-            WindowEvent::Resized(physical_size) => state.resize(*physical_size),
+        Event::WindowEvent { window_id, ref event } if window_id == program_state.window.id() => match event {
+            WindowEvent::Resized(physical_size) => program_state.resize(*physical_size),
 
             WindowEvent::CloseRequested 
             | WindowEvent::KeyboardInput { 
                 event: 
                     KeyEvent { 
                         physical_key: PhysicalKey::Code(KeyCode::Escape), 
-                        state: ElementState::Pressed, repeat: false, .. }, .. }=> {
+                        state: ElementState::Pressed, repeat: false, .. }, .. } => {
                 println!("Goodbye see you!");
                 elwt.exit();
             }
 
-            WindowEvent::RedrawRequested => match state.render() {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key,
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                let key_code = match physical_key {
+                    PhysicalKey::Code(code) => Some(code),
+                    _ => None,
+                };
+                match state {
+                    ElementState::Pressed => {
+                        if let Some(code) = key_code {
+                            program_state.scene.keys_pressed.insert(*code);
+                        }
+                    },
+                    ElementState::Released => {
+                        if let Some(code) = key_code {
+                            program_state.scene.keys_pressed.remove(&code);
+                        }
+                    },
+                }
+            },                    
+
+            WindowEvent::RedrawRequested => match program_state.render() {
                 Ok(_) => {},
-                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                Err(wgpu::SurfaceError::Lost) => program_state.resize(program_state.size),
                 Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
                 Err(e) => eprintln!("{:?}", e),
             }
