@@ -5,31 +5,25 @@ use winit::keyboard::KeyCode;
 
 use super::{Camera, Node, Sphere}; // Import the Rng trait to use random number generation methods
 
-pub struct SceneData {
-    pub camera_pos: (f32, f32, f32),
-    pub camera_forwards: (f32, f32, f32),
-    pub camera_right: (f32, f32, f32),
-    pub camera_up: (f32, f32, f32),
-    pub sphere_count: f32,
-}
-
 pub struct Scene {
     pub spheres: Vec<Sphere>,
     pub camera: Camera,
     pub nodes: Vec<Node>,
     pub nodes_used: usize,
     pub sphere_indices: Vec<usize>,
+    pub max_bounces: usize,
     pub keys_pressed: HashSet<KeyCode>,
 }
 
 impl Scene {
-    pub fn new(sphere_count: usize) -> Self {
+    pub fn new(sphere_count: usize, max_bounces: usize) -> Self {
         let mut scene = Self {
             spheres: Vec::with_capacity(sphere_count),
             camera: Camera::new((-20.0, 0.0, 0.0)),
             nodes: Vec::with_capacity(2 * sphere_count - 1),
             nodes_used: 0,
             sphere_indices: Vec::with_capacity(sphere_count),
+            max_bounces: max_bounces,
             keys_pressed: HashSet::new(),
         };
 
@@ -198,14 +192,28 @@ impl Scene {
         pos
     }
 
-    pub fn to_scene_data(&self) -> SceneData {
-        SceneData {
-            camera_pos: self.camera.position,
-            camera_forwards: self.camera.forwards,
-            camera_right: self.camera.right,
-            camera_up: self.camera.up,
-            sphere_count: self.spheres.len() as f32,
-        }
+    pub fn flatten_scene_data(&self) -> Vec<u8> {
+        let scene_data_flat: [f32; 16] = [
+            self.camera.position.0,
+            self.camera.position.1,
+            self.camera.position.2,
+            0.0, // Padding for alignment
+            self.camera.forwards.0,
+            self.camera.forwards.1,
+            self.camera.forwards.2,
+            0.0, // Padding for alignment
+            self.camera.right.0,
+            self.camera.right.1,
+            self.camera.right.2,
+            self.max_bounces as f32,
+            self.camera.up.0,
+            self.camera.up.1,
+            self.camera.up.2,
+            self.spheres.len() as f32,
+        ];
+
+        // Convert the f32 array to bytes and return
+        bytemuck::cast_slice(&scene_data_flat).to_vec()
     }
 
     pub fn flatten_sphere_data(&self) -> Vec<u8> {

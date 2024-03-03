@@ -71,6 +71,14 @@ impl<'a> State<'a> {
             .await.unwrap();
 
         let surface_capabilities = surface.get_capabilities(&adapter);
+
+        // Prefer Immediate mode for lower latency, but fall back to Fifo if not supported.
+        let present_mode = if surface_capabilities.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            println!("Chose imadiate");
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo // Guaranteed to be supported
+        };
         let surface_format = surface_capabilities
             .formats
             .iter()
@@ -83,7 +91,7 @@ impl<'a> State<'a> {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_capabilities.present_modes[0],
+            present_mode: present_mode,
             alpha_mode: surface_capabilities.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2
@@ -464,13 +472,16 @@ impl<'a> State<'a> {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError>{
-        let start_time = std::time::Instant::now();
+        
         self.prepare_scene();
-
+        
+        let start_time = std::time::Instant::now();
         let drawable = self.surface.get_current_texture()?;
+        let duration = start_time.elapsed(); // Calculate how long the rendering took
+        println!("Rendered in {:?}",duration);
         let image_view_descriptor = wgpu::TextureViewDescriptor::default();
         let image_view = drawable.texture.create_view(&image_view_descriptor);
-
+        
         let command_encoder_descriptor = wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder")
         };
@@ -507,7 +518,6 @@ impl<'a> State<'a> {
             timestamp_writes: None,
             occlusion_query_set: None,
         };
-
         // Begin the render pass and set up for drawing
         {
             let mut render_pass = command_encoder.begin_render_pass(&render_pass_descriptor);
@@ -515,48 +525,28 @@ impl<'a> State<'a> {
             render_pass.set_bind_group(0, &self.screen_bind_group, &[]); // Set the bind group
             render_pass.draw(0..6, 0..1);
         }
-
+        
         self.queue.submit(std::iter::once(command_encoder.finish()));
-
+        
         drawable.present();
-
-        let duration = start_time.elapsed(); // Calculate how long the rendering took
-
+        
+        
+        
         let sphere_count = self.scene.spheres.len();
-
-        println!("Rendered in {:?}, Sphere count: {}", duration, sphere_count);
+        // println!("Rendered in {:?}, Sphere count: {}", duration, sphere_count);
+        
         Ok(())
     }
 
     fn prepare_scene(&self) {
-        let scene_data = self.scene.to_scene_data();
-        let scene_data_flat: [f32; 16] = [
-            scene_data.camera_pos.0,
-            scene_data.camera_pos.1,
-            scene_data.camera_pos.2,
-            0.0, // Padding for alignment
-            scene_data.camera_forwards.0,
-            scene_data.camera_forwards.1,
-            scene_data.camera_forwards.2,
-            0.0, // Padding for alignment
-            scene_data.camera_right.0,
-            scene_data.camera_right.1,
-            scene_data.camera_right.2,
-            0.0, // Padding for alignment
-            scene_data.camera_up.0,
-            scene_data.camera_up.1,
-            scene_data.camera_up.2,
-            scene_data.sphere_count
-        ];
-
         // Convert the f32 array to bytes
-        let byte_data = bytemuck::cast_slice(&scene_data_flat);
+        let scene_data_bytes = self.scene.flatten_scene_data();
 
         // Write to the buffer
         self.queue.write_buffer(
             &self.scene_parameters, 
             0,
-            byte_data,
+            &scene_data_bytes,
         );
 
         // Get sphere data in bytes
@@ -609,7 +599,7 @@ pub async fn run() {
         event_loop_proxy.send_event(CustomEvent::Timer).ok();
     });
 
-    let mut program_state: State<'_> = State::new(&window, Scene::new(81400)).await;
+    let mut program_state: State<'_> = State::new(&window, Scene::new(1024, 4)).await;
 
     event_loop.run(move | event, elwt | match event {
         Event::UserEvent(..) => {
