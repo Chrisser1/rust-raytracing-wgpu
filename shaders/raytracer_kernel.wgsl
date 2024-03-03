@@ -53,7 +53,7 @@ struct RenderState {
 @group(0) @binding(5) var skyMaterial: texture_cube<f32>;
 @group(0) @binding(6) var skySampler: sampler;
 
-@compute @workgroup_size(1,1,1)
+@compute @workgroup_size(16,16,1)
 fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3<u32>) {
 
     let screen_size: vec2<i32> = vec2<i32>(textureDimensions(color_buffer));

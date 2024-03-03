@@ -179,7 +179,7 @@ impl<'a> State<'a> {
         let mut ray_trace_pass = command_encoder.begin_compute_pass(&ray_trace_pass_descriptor);
         ray_trace_pass.set_pipeline(&self.ray_tracing_pipeline);
         ray_trace_pass.set_bind_group(0, &self.ray_tracing_bind_group, &[]);
-        ray_trace_pass.dispatch_workgroups(self.size.width, self.size.height, 1);
+        ray_trace_pass.dispatch_workgroups(self.size.width/16, self.size.height/16, 1);
         drop(ray_trace_pass);
         
         let color_attachment = wgpu::RenderPassColorAttachment {
