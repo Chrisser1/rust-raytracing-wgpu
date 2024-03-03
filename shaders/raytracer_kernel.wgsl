@@ -50,6 +50,8 @@ struct RenderState {
 @group(0) @binding(2) var<storage, read> objects: ObjectData;
 @group(0) @binding(3) var<storage, read> tree: BVH;
 @group(0) @binding(4) var<storage, read> sphereLookup: ObjectIndices;
+@group(0) @binding(5) var skyMaterial: texture_cube<f32>;
+@group(0) @binding(6) var skySampler: sampler;
 
 @compute @workgroup_size(1,1,1)
 fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3<u32>) {
@@ -105,8 +107,6 @@ fn rayColor (ray: Ray) -> vec3<f32> {
 fn trace(ray: Ray) -> RenderState {
     // Set up the render state 
     var renderState: RenderState;
-    // Sky color
-    renderState.color = vec3(0.0, 1.0, 1.0);
 
     // Set up the start
     renderState.hit = false;
@@ -178,6 +178,11 @@ fn trace(ray: Ray) -> RenderState {
                 node = stack[stackLocation];
             }
         }
+    }
+
+    if (!renderState.hit) {
+        // Sky color 
+        renderState.color = textureSampleLevel(skyMaterial, skySampler, ray.direction, 0.0).xyz;
     }
 
     return renderState;

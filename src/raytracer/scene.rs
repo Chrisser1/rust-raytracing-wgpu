@@ -27,24 +27,27 @@ impl Scene {
             keys_pressed: HashSet::new(),
         };
 
-        let mut rng = rand::thread_rng(); // Get a random number generator
+        let golden_angle = std::f32::consts::PI * (3.0 - (5.0_f32).sqrt()); // Golden angle in radians
+        let radius = 50.0; // Radius of the imaginary sphere on which to place the spheres
 
-        for _ in 0..sphere_count {
-            let center = (
-                -50.0 + 100.0 * rng.gen::<f32>(),
-                -50.0 + 100.0 * rng.gen::<f32>(),
-                -50.0 + 100.0 * rng.gen::<f32>(),
-            );
-            
+        for i in 0..sphere_count {
+            let theta = golden_angle * i as f32; // Angle around the spiral
+            let z = 1.0 - (i as f32) / (sphere_count as f32 - 1.0) * 2.0; // Z-coordinate varies linearly from 1 to -1
+            let x = theta.cos() * (1.0 - z * z).sqrt();
+            let y = theta.sin() * (1.0 - z * z).sqrt();
+
+            let center = (radius * x, radius * y, radius * z);
+
+            let mut rng = rand::thread_rng(); // Get a random number generator for colors
             let color = (
                 0.3 + 0.7 * rng.gen::<f32>(),
                 0.3 + 0.7 * rng.gen::<f32>(),
                 0.3 + 0.7 * rng.gen::<f32>(),
             );
 
-            let radius = 0.1 + 1.9 * rng.gen::<f32>();
+            let sphere_radius = 0.1 + 1.9 * rng.gen::<f32>(); // Random sphere radius
 
-            scene.spheres.push(Sphere::new(center, color, radius));
+            scene.spheres.push(Sphere::new(center, color, sphere_radius));
         }
 
         // Initialize sphere indices for easy tracking

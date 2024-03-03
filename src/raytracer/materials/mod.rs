@@ -1,3 +1,3 @@
-pub mod material;
+pub mod cube_material;
 
-pub use material::*;
+pub use cube_material::*;

@@ -1,4 +1,5 @@
 
+use image::DynamicImage;
 use wgpu::{naga::back::msl::sampler, util::DeviceExt, BufferBinding, BufferUsages, Extent3d, MultisampleState, Sampler, TextureView};
 use winit::{
     dpi::PhysicalSize, 
@@ -9,8 +10,9 @@ use winit::{
 
 use std::fs;
 use std::path::Path;
+use image::io::Reader as ImageReader;
 
-use super::{scene, Scene};
+use super::{CubeMapMaterial, Scene};
 
 struct State<'a> {
     // Device/Context objects
@@ -29,6 +31,7 @@ struct State<'a> {
     sphere_buffer: wgpu::Buffer,
     node_buffer: wgpu::Buffer,
     sphere_index_buffer: wgpu::Buffer,
+    sky_material: CubeMapMaterial,
 
     // Pipeline Objects
     ray_tracing_pipeline: wgpu::ComputePipeline,
@@ -74,7 +77,6 @@ impl<'a> State<'a> {
 
         // Prefer Immediate mode for lower latency, but fall back to Fifo if not supported.
         let present_mode = if surface_capabilities.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            println!("Chose imadiate");
             wgpu::PresentMode::Immediate
         } else {
             wgpu::PresentMode::Fifo // Guaranteed to be supported
@@ -98,21 +100,28 @@ impl<'a> State<'a> {
         };
         surface.configure(&device, &config);
 
-        let (
-            color_buffer, 
+        // Create assets to be used
+        let (color_buffer, 
             color_buffer_view, 
             sampler, 
             scene_parameters, 
             sphere_buffer, 
             node_buffer, 
-            sphere_index_buffer) = Self::create_assets(&device, &size, &scene).await;
-
-        let (
-            ray_tracing_pipeline, 
-            ray_tracing_bind_group, 
-            screen_pipeline, 
-            screen_bind_group) = Self::make_pipeline(&device, &color_buffer_view, &sampler, &scene_parameters, &sphere_buffer, &node_buffer, &sphere_index_buffer).await;
+            sphere_index_buffer,
+            sky_material) = create_assets(&device, &size, &scene, &queue).await;
         
+        // create bind group layouts
+        let (ray_tracing_bind_group_layout, 
+            screen_bind_group_layout) = make_bind_group_layouts(&device).await;
+        
+        // Create render pipeline
+        let (ray_tracing_pipeline, 
+            screen_pipeline) = make_pipeline(&device, &ray_tracing_bind_group_layout, &screen_bind_group_layout).await;
+        
+        // Create bind groups
+        let (ray_tracing_bind_group, 
+            screen_bind_group) = make_bind_groups(&device, &color_buffer_view, &sampler, &scene_parameters, &sphere_buffer, &node_buffer, &sphere_index_buffer, &ray_tracing_bind_group_layout, &screen_bind_group_layout, &sky_material).await;
+
         Self {
             // Device/Context objects
             surface,
@@ -129,6 +138,7 @@ impl<'a> State<'a> {
             sphere_buffer,
             node_buffer,
             sphere_index_buffer,
+            sky_material,
             // Pipeline Objects
             ray_tracing_pipeline,
             ray_tracing_bind_group,
@@ -137,329 +147,6 @@ impl<'a> State<'a> {
             // Scene to render
             scene,
         }
-    }
-
-    async fn create_assets(
-        device: &wgpu::Device,
-        size: &winit::dpi::PhysicalSize<u32>,
-        scene: &Scene,
-    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
-        let color_buffer_description = wgpu::TextureDescriptor {
-            label: Some("Color Buffer Description"),
-            size: wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
-        };
-        let color_buffer = device.create_texture(&color_buffer_description);
-    
-        let color_buffer_view_description = wgpu::TextureViewDescriptor {
-            label: Some("Color Buffer View Description"),
-            format: None,
-            dimension: None,
-            aspect: wgpu::TextureAspect::All,
-            base_mip_level: 0,
-            mip_level_count: None,
-            base_array_layer: 0,
-            array_layer_count: None,
-        };
-    
-        let color_buffer_view = color_buffer.create_view(&color_buffer_view_description);
-    
-        let sampler_descriptor = wgpu::SamplerDescriptor {
-            label: Some("Sampler Descriptor"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: f32::MAX,
-            compare: None,
-            anisotropy_clamp: 1,
-            border_color: None,
-        };
-    
-        let sampler = device.create_sampler(&sampler_descriptor);
-
-        let parameter_buffer_descriptor = wgpu::BufferDescriptor {
-            label: Some("Parameter Buffer Descriptor"),
-            size: 64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        };
-        let scene_parameters = device.create_buffer(&parameter_buffer_descriptor);
-
-        let sphere_buffer_descriptor = wgpu::BufferDescriptor {
-            label: Some("Sphere Buffer Descriptor"),
-            size: 32 * scene.spheres.len() as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        };
-        let sphere_buffer = device.create_buffer(&sphere_buffer_descriptor);
-
-        let node_buffer_descriptor = wgpu::BufferDescriptor {
-            label: Some("Node Buffer Descriptor"),
-            size: 32u64 * (scene.nodes_used as u64),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        };
-        let node_buffer = device.create_buffer(&node_buffer_descriptor);
-
-        let sphere_index_buffer_descriptor = wgpu::BufferDescriptor {
-            label: Some("Sphere Buffer Descriptor"),
-            size: 4 * scene.spheres.len() as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        };
-        let sphere_index_buffer = device.create_buffer(&sphere_index_buffer_descriptor);
-
-        // Return the created resources
-        (color_buffer, color_buffer_view, sampler, scene_parameters, sphere_buffer, node_buffer, sphere_index_buffer)
-    }    
-
-    async fn make_pipeline(
-        device: &wgpu::Device,
-        color_buffer_view: &wgpu::TextureView,
-        sampler: &Sampler,
-        scene_parameters: &wgpu::Buffer,
-        sphere_buffer: &wgpu::Buffer,
-        node_buffer: &wgpu::Buffer,
-        sphere_index_buffer: &wgpu::Buffer,
-    ) -> (wgpu::ComputePipeline, wgpu::BindGroup, wgpu::RenderPipeline, wgpu::BindGroup) {
-        let ray_tracing_bind_group_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
-            label: Some("Ray Bind Group Layout Descriptor"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None, // Not an arrayed binding
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { 
-                        ty: wgpu::BufferBindingType::Uniform, 
-                        has_dynamic_offset: false, 
-                        min_binding_size: None,
-                    },
-                    count: None, // Not an arrayed binding
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { 
-                        ty: wgpu::BufferBindingType::Storage { read_only: true }, 
-                        has_dynamic_offset: false, 
-                        min_binding_size: None,
-                    },
-                    count: None, // Not an arrayed binding
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { 
-                        ty: wgpu::BufferBindingType::Storage { read_only: true }, 
-                        has_dynamic_offset: false, 
-                        min_binding_size: None,
-                    },
-                    count: None, // Not an arrayed binding
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { 
-                        ty: wgpu::BufferBindingType::Storage { read_only: true }, 
-                        has_dynamic_offset: false, 
-                        min_binding_size: None,
-                    },
-                    count: None, // Not an arrayed binding
-                },
-            ],
-        };
-        let ray_tracing_bind_group_layout = device.create_bind_group_layout(&ray_tracing_bind_group_layout_descriptor);
-
-        let ray_tracing_bind_group_descriptor = wgpu::BindGroupDescriptor {
-            label: Some("Ray bind Group Descriptor"),
-            layout: &ray_tracing_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&color_buffer_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(BufferBinding {
-                        buffer: scene_parameters,
-                        offset: 0,
-                        size: None, // Use the entire buffer
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Buffer(BufferBinding {
-                        buffer: sphere_buffer,
-                        offset: 0,
-                        size: None, // Use the entire buffer
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Buffer(BufferBinding {
-                        buffer: node_buffer,
-                        offset: 0,
-                        size: None, // Use the entire buffer
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Buffer(BufferBinding {
-                        buffer: sphere_index_buffer,
-                        offset: 0,
-                        size: None, // Use the entire buffer
-                    }),
-                },
-            ],
-        };
-        let ray_tracing_bind_group = device.create_bind_group(&ray_tracing_bind_group_descriptor);
-
-        let ray_tracing_pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
-            label: Some("Ray Tracing Pipeline Layout"),
-            bind_group_layouts: &[&ray_tracing_bind_group_layout],
-            push_constant_ranges: &[], // No push constants used,
-        };
-        let ray_tracing_pipeline_layout = device.create_pipeline_layout(&ray_tracing_pipeline_layout_descriptor);
-
-            // Create the shader module
-            let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Ray Tracing Shader Module"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/raytracer_kernel.wgsl").into()),
-            });
-
-        // Define the compute pipeline descriptor with the shader module and entry point
-        let ray_tracing_pipeline_descriptor = wgpu::ComputePipelineDescriptor {
-            label: Some("Ray Pipeline Descriptor"),
-            layout: Some(&ray_tracing_pipeline_layout),
-            module: &shader_module,
-            entry_point: "main", // Entry point in the shader
-        };
-
-        // Create the compute pipeline
-        let ray_tracing_pipeline = device.create_compute_pipeline(&ray_tracing_pipeline_descriptor);
-
-        // ----------Screen pipeline---------- //
-        let screen_bind_group_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
-            label: Some("Screen Bind Group Layout Descriptor"),
-            entries: &[
-                // Sampler entry
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Texture entry
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        };
-        let screen_bind_group_layout = device.create_bind_group_layout(&screen_bind_group_layout_descriptor);
-        
-        let screen_bind_group_descriptor = wgpu::BindGroupDescriptor {
-            label: Some("Screen bind Group Descriptor"),
-            layout: &screen_bind_group_layout,
-            entries: &[
-                // Sampler
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                // Texture view
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&color_buffer_view),
-                },
-            ],
-        };
-        let screen_bind_group = device.create_bind_group(&screen_bind_group_descriptor);
-        
-
-        let screen_pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
-            label: Some("Screen Pipeline Layout"),
-            bind_group_layouts: &[&screen_bind_group_layout],
-            push_constant_ranges: &[], // No push constants used,
-        };
-        let screen_pipeline_layout = device.create_pipeline_layout(&screen_pipeline_layout_descriptor);
-
-        // Vertex shader module
-        let vertex_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Vertex Shader Module"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/screen_shader.wgsl").into()),
-        });
-
-        // Fragment shader module
-        let fragment_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Fragment Shader Module"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/screen_shader.wgsl").into()),
-        });
-
-        // Define the render pipeline descriptor
-        let screen_pipeline_descriptor = wgpu::RenderPipelineDescriptor {
-            label: Some("Screen Pipeline Descriptor"),
-            layout: Some(&screen_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vertex_shader_module,
-                entry_point: "vert_main",
-                buffers: &[], // Define your vertex buffers here
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fragment_shader_module,
-                entry_point: "frag_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        };
-
-        // Create the render pipeline
-        let screen_pipeline = device.create_render_pipeline(&screen_pipeline_descriptor);
-
-        // Return the created resources
-        (ray_tracing_pipeline, ray_tracing_bind_group, screen_pipeline, screen_bind_group)
     }
 
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -477,8 +164,6 @@ impl<'a> State<'a> {
         
         let start_time = std::time::Instant::now();
         let drawable = self.surface.get_current_texture()?;
-        let duration = start_time.elapsed(); // Calculate how long the rendering took
-        println!("Rendered in {:?}",duration);
         let image_view_descriptor = wgpu::TextureViewDescriptor::default();
         let image_view = drawable.texture.create_view(&image_view_descriptor);
         
@@ -486,7 +171,7 @@ impl<'a> State<'a> {
             label: Some("Render Encoder")
         };
         let mut command_encoder = self.device.create_command_encoder(&command_encoder_descriptor);
-
+        
         let ray_trace_pass_descriptor = wgpu::ComputePassDescriptor {
             label: Some("Ray Pass Descriptor"),
             timestamp_writes: None,
@@ -496,7 +181,7 @@ impl<'a> State<'a> {
         ray_trace_pass.set_bind_group(0, &self.ray_tracing_bind_group, &[]);
         ray_trace_pass.dispatch_workgroups(self.size.width, self.size.height, 1);
         drop(ray_trace_pass);
-
+        
         let color_attachment = wgpu::RenderPassColorAttachment {
             view: &image_view,
             resolve_target: None,
@@ -510,7 +195,7 @@ impl<'a> State<'a> {
                 store: wgpu::StoreOp::Store,
             },
         };
-
+        
         let render_pass_descriptor = wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(color_attachment)],
@@ -530,10 +215,9 @@ impl<'a> State<'a> {
         
         drawable.present();
         
-        
-        
         let sphere_count = self.scene.spheres.len();
-        // println!("Rendered in {:?}, Sphere count: {}", duration, sphere_count);
+        let duration = start_time.elapsed(); // Calculate how long the rendering took
+        println!("Rendered in {:?}, Sphere count: {}", duration, sphere_count);
         
         Ok(())
     }
@@ -580,6 +264,391 @@ impl<'a> State<'a> {
     }
 }
 
+async fn create_assets(
+    device: &wgpu::Device,
+    size: &winit::dpi::PhysicalSize<u32>,
+    scene: &Scene,
+    queue: &wgpu::Queue,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, CubeMapMaterial) {
+    let color_buffer_description = wgpu::TextureDescriptor {
+        label: Some("Color Buffer Description"),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+    };
+    let color_buffer = device.create_texture(&color_buffer_description);
+
+    let color_buffer_view_description = wgpu::TextureViewDescriptor {
+        label: Some("Color Buffer View Description"),
+        format: None,
+        dimension: None,
+        aspect: wgpu::TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: None,
+    };
+
+    let color_buffer_view = color_buffer.create_view(&color_buffer_view_description);
+
+    let sampler_descriptor = wgpu::SamplerDescriptor {
+        label: Some("Sampler Descriptor"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        lod_min_clamp: 0.0,
+        lod_max_clamp: f32::MAX,
+        compare: None,
+        anisotropy_clamp: 1,
+        border_color: None,
+    };
+
+    let sampler = device.create_sampler(&sampler_descriptor);
+
+    let parameter_buffer_descriptor = wgpu::BufferDescriptor {
+        label: Some("Parameter Buffer Descriptor"),
+        size: 64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    };
+    let scene_parameters = device.create_buffer(&parameter_buffer_descriptor);
+
+    let sphere_buffer_descriptor = wgpu::BufferDescriptor {
+        label: Some("Sphere Buffer Descriptor"),
+        size: 32 * scene.spheres.len() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    };
+    let sphere_buffer = device.create_buffer(&sphere_buffer_descriptor);
+
+    let node_buffer_descriptor = wgpu::BufferDescriptor {
+        label: Some("Node Buffer Descriptor"),
+        size: 32u64 * (scene.nodes_used as u64),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    };
+    let node_buffer = device.create_buffer(&node_buffer_descriptor);
+
+    let sphere_index_buffer_descriptor = wgpu::BufferDescriptor {
+        label: Some("Sphere Buffer Descriptor"),
+        size: 4 * scene.spheres.len() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    };
+    let sphere_index_buffer = device.create_buffer(&sphere_index_buffer_descriptor);
+
+    let paths = vec![
+        "assets/sky_front.png",
+        "assets/sky_back.png",
+        "assets/sky_left.png",
+        "assets/sky_right.png",
+        "assets/sky_bottom.png",
+        "assets/sky_top.png",
+    ];
+    let images:Vec<DynamicImage> = load_cube_map_images(paths);
+    let sky_material: CubeMapMaterial = CubeMapMaterial::new(device, queue, images);
+    // Return the created resources
+    (color_buffer, color_buffer_view, sampler, scene_parameters, sphere_buffer, node_buffer, sphere_index_buffer, sky_material)
+} 
+
+async fn make_bind_group_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
+    // ----------Ray tracing bind group---------- //
+    let ray_tracing_bind_group_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
+        label: Some("Ray Bind Group Layout Descriptor"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None, // Not an arrayed binding
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { 
+                    ty: wgpu::BufferBindingType::Uniform, 
+                    has_dynamic_offset: false, 
+                    min_binding_size: None,
+                },
+                count: None, // Not an arrayed binding
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { 
+                    ty: wgpu::BufferBindingType::Storage { read_only: true }, 
+                    has_dynamic_offset: false, 
+                    min_binding_size: None,
+                },
+                count: None, // Not an arrayed binding
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { 
+                    ty: wgpu::BufferBindingType::Storage { read_only: true }, 
+                    has_dynamic_offset: false, 
+                    min_binding_size: None,
+                },
+                count: None, // Not an arrayed binding
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { 
+                    ty: wgpu::BufferBindingType::Storage { read_only: true }, 
+                    has_dynamic_offset: false, 
+                    min_binding_size: None,
+                },
+                count: None, // Not an arrayed binding
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    };
+    let ray_tracing_bind_group_layout: wgpu::BindGroupLayout = device.create_bind_group_layout(&ray_tracing_bind_group_layout_descriptor);
+
+    // ----------Screen bind group---------- //
+    let screen_bind_group_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
+        label: Some("Screen Bind Group Layout Descriptor"),
+        entries: &[
+            // Sampler entry
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // Texture entry
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    };
+    let screen_bind_group_layout = device.create_bind_group_layout(&screen_bind_group_layout_descriptor);
+
+    (ray_tracing_bind_group_layout, screen_bind_group_layout)
+}
+
+async fn make_bind_groups(
+    device: &wgpu::Device,
+    color_buffer_view: &wgpu::TextureView,
+    sampler: &Sampler,
+    scene_parameters: &wgpu::Buffer,
+    sphere_buffer: &wgpu::Buffer,
+    node_buffer: &wgpu::Buffer,
+    sphere_index_buffer: &wgpu::Buffer,
+    ray_tracing_bind_group_layout: &wgpu::BindGroupLayout,
+    screen_bind_group_layout: &wgpu::BindGroupLayout,
+    sky_material: &CubeMapMaterial) -> (wgpu::BindGroup, wgpu::BindGroup) {
+    // ----------Ray tracing bind groups---------- //
+    let ray_tracing_bind_group_descriptor = wgpu::BindGroupDescriptor {
+        label: Some("Ray bind Group Descriptor"),
+        layout: &ray_tracing_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&color_buffer_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Buffer(BufferBinding {
+                    buffer: scene_parameters,
+                    offset: 0,
+                    size: None, // Use the entire buffer
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Buffer(BufferBinding {
+                    buffer: sphere_buffer,
+                    offset: 0,
+                    size: None, // Use the entire buffer
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Buffer(BufferBinding {
+                    buffer: node_buffer,
+                    offset: 0,
+                    size: None, // Use the entire buffer
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Buffer(BufferBinding {
+                    buffer: sphere_index_buffer,
+                    offset: 0,
+                    size: None, // Use the entire buffer
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&sky_material.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::Sampler(&sky_material.sampler),
+            },
+        ],
+    };
+    let ray_tracing_bind_group = device.create_bind_group(&ray_tracing_bind_group_descriptor);
+    
+    // ----------Screen bind groups---------- //
+    let screen_bind_group_descriptor = wgpu::BindGroupDescriptor {
+        label: Some("Screen bind Group Descriptor"),
+        layout: &screen_bind_group_layout,
+        entries: &[
+            // Sampler
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            // Texture view
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&color_buffer_view),
+            },
+        ],
+    };
+    let screen_bind_group = device.create_bind_group(&screen_bind_group_descriptor);
+
+    (ray_tracing_bind_group, screen_bind_group)
+}
+
+async fn make_pipeline(
+    device: &wgpu::Device,
+    ray_tracing_bind_group_layout: &wgpu::BindGroupLayout,
+    screen_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> (wgpu::ComputePipeline, wgpu::RenderPipeline) {
+    // ----------Ray tracing pipeline---------- //
+    let ray_tracing_pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
+        label: Some("Ray Tracing Pipeline Layout"),
+        bind_group_layouts: &[&ray_tracing_bind_group_layout],
+        push_constant_ranges: &[], // No push constants used,
+    };
+    let ray_tracing_pipeline_layout = device.create_pipeline_layout(&ray_tracing_pipeline_layout_descriptor);
+
+    // Create the shader module
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Ray Tracing Shader Module"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/raytracer_kernel.wgsl").into()),
+        });
+
+    // Define the compute pipeline descriptor with the shader module and entry point
+    let ray_tracing_pipeline_descriptor = wgpu::ComputePipelineDescriptor {
+        label: Some("Ray Pipeline Descriptor"),
+        layout: Some(&ray_tracing_pipeline_layout),
+        module: &shader_module,
+        entry_point: "main", // Entry point in the shader
+    };
+
+    // Create the compute pipeline
+    let ray_tracing_pipeline = device.create_compute_pipeline(&ray_tracing_pipeline_descriptor);
+
+    // ----------Screen pipeline---------- //
+    let screen_pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
+        label: Some("Screen Pipeline Layout"),
+        bind_group_layouts: &[&screen_bind_group_layout],
+        push_constant_ranges: &[], // No push constants used,
+    };
+    let screen_pipeline_layout = device.create_pipeline_layout(&screen_pipeline_layout_descriptor);
+
+    // Vertex shader module
+    let vertex_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Vertex Shader Module"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/screen_shader.wgsl").into()),
+    });
+
+    // Fragment shader module
+    let fragment_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Fragment Shader Module"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/screen_shader.wgsl").into()),
+    });
+
+    // Define the render pipeline descriptor
+    let screen_pipeline_descriptor = wgpu::RenderPipelineDescriptor {
+        label: Some("Screen Pipeline Descriptor"),
+        layout: Some(&screen_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &vertex_shader_module,
+            entry_point: "vert_main",
+            buffers: &[], // Define your vertex buffers here
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &fragment_shader_module,
+            entry_point: "frag_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    };
+
+    // Create the render pipeline
+    let screen_pipeline = device.create_render_pipeline(&screen_pipeline_descriptor);
+
+    // Return the created resources
+    (ray_tracing_pipeline, screen_pipeline)
+}
+
+fn load_cube_map_images(paths: Vec<&str>) -> Vec<DynamicImage> {
+    paths.into_iter().map(|path| {
+        ImageReader::open(Path::new(path))
+            .expect("Failed to open image")
+            .decode()
+            .expect("Failed to decode image")
+    }).collect()
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CustomEvent {
     Timer,
@@ -599,7 +668,7 @@ pub async fn run() {
         event_loop_proxy.send_event(CustomEvent::Timer).ok();
     });
 
-    let mut program_state: State<'_> = State::new(&window, Scene::new(1024, 4)).await;
+    let mut program_state: State<'_> = State::new(&window, Scene::new(2000, 5)).await;
 
     event_loop.run(move | event, elwt | match event {
         Event::UserEvent(..) => {
