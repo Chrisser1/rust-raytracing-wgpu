@@ -1,21 +1,23 @@
+use super::Vec3;
+
 pub struct Camera {
-    pub position: (f32, f32, f32),
+    pub position: Vec3,
     pub theta: f32,
     pub phi: f32,
-    pub forwards: (f32, f32, f32),
-    pub right: (f32, f32, f32),
-    pub up: (f32, f32, f32),
+    pub forwards: Vec3,
+    pub right: Vec3,
+    pub up: Vec3,
 }
 
 impl Camera {
-    pub fn new(position: (f32, f32, f32)) -> Self {
+    pub fn new(position: Vec3) -> Self {
         let mut camera = Self {
             position,
             theta: 0.0,
             phi: 0.0,
-            forwards: (0.0, 0.0, 0.0),
-            right: (0.0, 0.0, 0.0),
-            up: (0.0, 0.0, 0.0),
+            forwards: Vec3(0.0, 0.0, 0.0),
+            right: Vec3(0.0, 0.0, 0.0),
+            up: Vec3(0.0, 0.0, 0.0),
         };
         camera.recalculate_vectors();
         camera
@@ -25,24 +27,15 @@ impl Camera {
         let theta_rad = self.theta * std::f32::consts::PI / 180.0;
         let phi_rad = self.phi * std::f32::consts::PI / 180.0;
 
-        self.forwards = (
+        self.forwards = Vec3(
             theta_rad.cos() * phi_rad.cos(),
             theta_rad.sin() * phi_rad.cos(),
             phi_rad.sin(),
         );
 
         // Simple cross product calculation for 'right' based on 'forwards' and a 'up' vector pointing up.
-        self.right = self.cross(self.forwards, (0.0, 0.0, 1.0));
-        self.up = self.cross(self.right, self.forwards);
-    }
-
-    // A minimal implementation of cross product for 3D vectors
-    fn cross(&self, v1: (f32, f32, f32), v2: (f32, f32, f32)) -> (f32, f32, f32) {
-        (
-            v1.1 * v2.2 - v1.2 * v2.1,
-            v1.2 * v2.0 - v1.0 * v2.2,
-            v1.0 * v2.1 - v1.1 * v2.0,
-        )
+        self.right = self.forwards.cross(Vec3(0.0, 0.0, 1.0));
+        self.up = self.right.cross(self.forwards);
     }
 
     // Moves the camera forwards or backwards
@@ -65,8 +58,6 @@ impl Camera {
         self.position.1 += self.up.1 * distance;
         self.position.2 += self.up.2 * distance;
     }
-
-
 
     // Rotates the camera left or right
     pub fn rotate_yaw(&mut self, angle: f32) {

@@ -1,5 +1,9 @@
-pub mod shapes_definition;
 pub mod sphere;
+pub mod triangle;
+pub mod obj_mesh;
+pub mod utils;
 
-pub use shapes_definition::*;
 pub use sphere::*;
+pub use triangle::*;
+pub use obj_mesh::*;
+pub use utils::*;

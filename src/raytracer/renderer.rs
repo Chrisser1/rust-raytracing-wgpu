@@ -28,9 +28,9 @@ struct State<'a> {
     color_buffer_view: TextureView,
     sampler: wgpu::Sampler,
     scene_parameters: wgpu::Buffer,
-    sphere_buffer: wgpu::Buffer,
+    object_buffer: wgpu::Buffer,
     node_buffer: wgpu::Buffer,
-    sphere_index_buffer: wgpu::Buffer,
+    object_index_buffer: wgpu::Buffer,
     sky_material: CubeMapMaterial,
 
     // Pipeline Objects
@@ -105,9 +105,9 @@ impl<'a> State<'a> {
             color_buffer_view, 
             sampler, 
             scene_parameters, 
-            sphere_buffer, 
+            object_buffer, 
             node_buffer, 
-            sphere_index_buffer,
+            object_index_buffer,
             sky_material) = create_assets(&device, &size, &scene, &queue).await;
         
         // create bind group layouts
@@ -120,7 +120,7 @@ impl<'a> State<'a> {
         
         // Create bind groups
         let (ray_tracing_bind_group, 
-            screen_bind_group) = make_bind_groups(&device, &color_buffer_view, &sampler, &scene_parameters, &sphere_buffer, &node_buffer, &sphere_index_buffer, &ray_tracing_bind_group_layout, &screen_bind_group_layout, &sky_material).await;
+            screen_bind_group) = make_bind_groups(&device, &color_buffer_view, &sampler, &scene_parameters, &object_buffer, &node_buffer, &object_index_buffer, &ray_tracing_bind_group_layout, &screen_bind_group_layout, &sky_material).await;
 
         Self {
             // Device/Context objects
@@ -135,9 +135,9 @@ impl<'a> State<'a> {
             color_buffer_view,
             sampler,
             scene_parameters,
-            sphere_buffer,
+            object_buffer,
             node_buffer,
-            sphere_index_buffer,
+            object_index_buffer,
             sky_material,
             // Pipeline Objects
             ray_tracing_pipeline,
@@ -179,7 +179,7 @@ impl<'a> State<'a> {
         let mut ray_trace_pass = command_encoder.begin_compute_pass(&ray_trace_pass_descriptor);
         ray_trace_pass.set_pipeline(&self.ray_tracing_pipeline);
         ray_trace_pass.set_bind_group(0, &self.ray_tracing_bind_group, &[]);
-        ray_trace_pass.dispatch_workgroups(self.size.width/16, self.size.height/16, 1);
+        ray_trace_pass.dispatch_workgroups(self.size.width/8, self.size.height/8, 1);
         drop(ray_trace_pass);
         
         let color_attachment = wgpu::RenderPassColorAttachment {
@@ -215,9 +215,9 @@ impl<'a> State<'a> {
         
         drawable.present();
         
-        let sphere_count = self.scene.spheres.len();
+        let object_count = self.scene.objects.len();
         let duration = start_time.elapsed(); // Calculate how long the rendering took
-        println!("Rendered in {:?}, Sphere count: {}", duration, sphere_count);
+        println!("Rendered in {:?}, object count: {}", duration, object_count);
         
         Ok(())
     }
@@ -233,14 +233,14 @@ impl<'a> State<'a> {
             &scene_data_bytes,
         );
 
-        // Get sphere data in bytes
-        let sphere_data_bytes = self.scene.flatten_sphere_data();
+        // Get object data in bytes
+        let object_data_bytes = self.scene.flatten_object_data();
 
         // Write to the buffer
         self.queue.write_buffer(
-            &self.sphere_buffer, // The wgpu::Buffer for sphere data
+            &self.object_buffer, // The wgpu::Buffer for object data
             0, // Offset within the buffer
-            &sphere_data_bytes, // The byte slice containing the sphere data
+            &object_data_bytes, // The byte slice containing the object data
         );
         
         // Get node data in bytes
@@ -253,13 +253,13 @@ impl<'a> State<'a> {
         );
 
         // Get node data in bytes
-        let sphere_index_data_bytes = self.scene.flatten_sphere_index_data();
+        let object_index_data_bytes = self.scene.flatten_object_index_data();
         
         // Write to the buffer
         self.queue.write_buffer(
-            &self.sphere_index_buffer, // The wgpu::Buffer for sphere_index data
+            &self.object_index_buffer, // The wgpu::Buffer for object_index data
             0, // Offset within the buffer
-            &sphere_index_data_bytes, // The byte slice containing the sphere_index data
+            &object_index_data_bytes, // The byte slice containing the object_index data
         );
     }
 }
@@ -324,13 +324,13 @@ async fn create_assets(
     };
     let scene_parameters = device.create_buffer(&parameter_buffer_descriptor);
 
-    let sphere_buffer_descriptor = wgpu::BufferDescriptor {
-        label: Some("Sphere Buffer Descriptor"),
-        size: 32 * scene.spheres.len() as u64,
+    let object_buffer_descriptor = wgpu::BufferDescriptor {
+        label: Some("Object Buffer Descriptor"),
+        size: 84 * scene.objects.len() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
-    let sphere_buffer = device.create_buffer(&sphere_buffer_descriptor);
+    let object_buffer = device.create_buffer(&object_buffer_descriptor);
 
     let node_buffer_descriptor = wgpu::BufferDescriptor {
         label: Some("Node Buffer Descriptor"),
@@ -340,26 +340,26 @@ async fn create_assets(
     };
     let node_buffer = device.create_buffer(&node_buffer_descriptor);
 
-    let sphere_index_buffer_descriptor = wgpu::BufferDescriptor {
-        label: Some("Sphere Buffer Descriptor"),
-        size: 4 * scene.spheres.len() as u64,
+    let object_index_buffer_descriptor = wgpu::BufferDescriptor {
+        label: Some("Object Buffer Descriptor"),
+        size: 4 * scene.objects.len() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
-    let sphere_index_buffer = device.create_buffer(&sphere_index_buffer_descriptor);
+    let object_index_buffer = device.create_buffer(&object_index_buffer_descriptor);
 
     let paths = vec![
-        "assets/sky_front.png",
-        "assets/sky_back.png",
-        "assets/sky_left.png",
-        "assets/sky_right.png",
-        "assets/sky_bottom.png",
-        "assets/sky_top.png",
+        "assets/gfx/sky_front.png",
+        "assets/gfx/sky_back.png",
+        "assets/gfx/sky_left.png",
+        "assets/gfx/sky_right.png",
+        "assets/gfx/sky_bottom.png",
+        "assets/gfx/sky_top.png",
     ];
     let images:Vec<DynamicImage> = load_cube_map_images(paths);
     let sky_material: CubeMapMaterial = CubeMapMaterial::new(device, queue, images);
     // Return the created resources
-    (color_buffer, color_buffer_view, sampler, scene_parameters, sphere_buffer, node_buffer, sphere_index_buffer, sky_material)
+    (color_buffer, color_buffer_view, sampler, scene_parameters, object_buffer, node_buffer, object_index_buffer, sky_material)
 } 
 
 async fn make_bind_group_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
@@ -471,9 +471,9 @@ async fn make_bind_groups(
     color_buffer_view: &wgpu::TextureView,
     sampler: &Sampler,
     scene_parameters: &wgpu::Buffer,
-    sphere_buffer: &wgpu::Buffer,
+    object_buffer: &wgpu::Buffer,
     node_buffer: &wgpu::Buffer,
-    sphere_index_buffer: &wgpu::Buffer,
+    object_index_buffer: &wgpu::Buffer,
     ray_tracing_bind_group_layout: &wgpu::BindGroupLayout,
     screen_bind_group_layout: &wgpu::BindGroupLayout,
     sky_material: &CubeMapMaterial) -> (wgpu::BindGroup, wgpu::BindGroup) {
@@ -497,7 +497,7 @@ async fn make_bind_groups(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Buffer(BufferBinding {
-                    buffer: sphere_buffer,
+                    buffer: object_buffer,
                     offset: 0,
                     size: None, // Use the entire buffer
                 }),
@@ -513,7 +513,7 @@ async fn make_bind_groups(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::Buffer(BufferBinding {
-                    buffer: sphere_index_buffer,
+                    buffer: object_index_buffer,
                     offset: 0,
                     size: None, // Use the entire buffer
                 }),
@@ -668,7 +668,7 @@ pub async fn run() {
         event_loop_proxy.send_event(CustomEvent::Timer).ok();
     });
 
-    let mut program_state: State<'_> = State::new(&window, Scene::new(2000, 5)).await;
+    let mut program_state: State<'_> = State::new(&window, Scene::new(100, 10)).await;
 
     event_loop.run(move | event, elwt | match event {
         Event::UserEvent(..) => {
