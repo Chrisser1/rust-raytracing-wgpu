@@ -18,6 +18,21 @@ impl Triangle {
             centroid
         }
     }
+    // Constructor to create a triangle directly from its corners and color
+    pub fn build_from_corners(corners: [Vec3; 3], color: Vec3) -> Self {
+        let centroid = Vec3(
+            (corners[0].0 + corners[1].0 + corners[2].0) * 0.3333,
+            (corners[0].1 + corners[1].1 + corners[2].1) * 0.3333,
+            (corners[0].2 + corners[1].2 + corners[2].2) * 0.3333,
+        );
+
+        Self {
+            corners,
+            color,
+            centroid,
+        }
+    }
+
     pub fn build_from_center_and_offsets(center: Vec3, offsets: [Vec3; 3], color: Vec3) -> Self {
         let mut corners = [Vec3(0.0, 0.0, 0.0); 3];
         let mut centroid = Vec3(0.0, 0.0, 0.0);

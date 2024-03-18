@@ -118,7 +118,7 @@ impl Vec2 {
 }
 
 // Implementing std::ops traits for syntactic sugar
-use std::ops::{Add, Sub, Mul, Div};
+use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign};
 
 impl Add for Vec3 {
     type Output = Vec3;
@@ -168,6 +168,46 @@ impl Div<f32> for Vec3 {
     }
 }
 
+impl AddAssign for Vec3 {
+    fn add_assign(&mut self, other: Self) {
+        *self = Self(
+            self.0 + other.0,
+            self.1 + other.1,
+            self.2 + other.2,
+        );
+    }
+}
+
+impl AddAssign<f32> for Vec3 {
+    fn add_assign(&mut self, scalar: f32) {
+        *self = Self(
+            self.0 + scalar,
+            self.1 + scalar,
+            self.2 + scalar,
+        );
+    }
+}
+
+impl SubAssign for Vec3 {
+    fn sub_assign(&mut self, other: Self) {
+        *self = Self(
+            self.0 - other.0,
+            self.1 - other.1,
+            self.2 - other.2,
+        );
+    }
+}
+
+impl SubAssign<f32> for Vec3 {
+    fn sub_assign(&mut self, scalar: f32) {
+        *self = Self(
+            self.0 - scalar,
+            self.1 - scalar,
+            self.2 - scalar,
+        );
+    }
+}
+
 impl Add for Vec2 {
     type Output = Vec2;
 
@@ -214,4 +254,48 @@ impl Div<f32> for Vec2 {
     fn div(self, scalar: f32) -> Self::Output {
         self.div(scalar)
     }
+}
+
+impl AddAssign for Vec2 {
+    fn add_assign(&mut self, other: Self) {
+        *self = Self(
+            self.0 + other.0,
+            self.1 + other.1,
+        );
+    }
+}
+
+impl AddAssign<f32> for Vec2 {
+    fn add_assign(&mut self, scalar: f32) {
+        *self = Self(
+            self.0 + scalar,
+            self.1 + scalar,
+        );
+    }
+}
+
+impl SubAssign for Vec2 {
+    fn sub_assign(&mut self, other: Self) {
+        *self = Self(
+            self.0 - other.0,
+            self.1 - other.1,
+        );
+    }
+}
+
+impl SubAssign<f32> for Vec2 {
+    fn sub_assign(&mut self, scalar: f32) {
+        *self = Self(
+            self.0 - scalar,
+            self.1 - scalar,
+        );
+    }
+}
+
+// Extra function for vectors
+pub fn rotate_vector_around_axis(vec: Vec3, axis: Vec3, angle: f32) -> Vec3 {
+    let cos_theta = angle.cos();
+    let sin_theta = angle.sin();
+    let axis_normalized = axis.normalize();
+    vec * cos_theta + (axis_normalized.cross(vec)) * sin_theta + axis_normalized * (axis_normalized.dot(vec)) * (1.0 - cos_theta)
 }

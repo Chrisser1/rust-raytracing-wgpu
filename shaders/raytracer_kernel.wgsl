@@ -37,11 +37,11 @@ struct Ray {
 }
 
 struct SceneData {
-    cameraPos: vec3<f32>,
-    cameraForwards: vec3<f32>,
-    cameraRight: vec3<f32>,
+    cameraOrigin: vec3<f32>,
+    lowerLeftCorner: vec3<f32>,
+    horizontal: vec3<f32>,
+    vertical: vec3<f32>,
     maxBounces: f32,
-    cameraUp: vec3<f32>,
     objectCount: f32,
 }
 
@@ -51,6 +51,7 @@ struct RenderState {
     hit: bool,
     position: vec3<f32>,
     normal: vec3<f32>,
+    front_face: bool,
 }
 
 @group(0) @binding(0) var color_buffer: texture_storage_2d<rgba8unorm, write>;
@@ -66,18 +67,15 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3<u32>) {
     let screen_size: vec2<i32> = vec2<i32>(textureDimensions(color_buffer));
     let screen_pos : vec2<i32> = vec2<i32>(i32(GlobalInvocationID.x), i32(GlobalInvocationID.y));
 
-    let horizontal_coefficient: f32 = (f32(screen_pos.x) - f32(screen_size.x) / 2) / f32(screen_size.x);
-    let vertical_coefficient: f32 = (f32(screen_pos.y) - f32(screen_size.y) / 2) / f32(screen_size.x);
-
-    let forwards: vec3<f32> = scene.cameraForwards;
-    let right: vec3<f32> = scene.cameraRight;
-    let up: vec3<f32> = scene.cameraUp;
-
+    // Calculate screen position
+    let uv: vec2<f32> = vec2<f32>(
+        (f32(GlobalInvocationID.x) + 0.5) / f32(screen_size.x),
+        (f32(GlobalInvocationID.y) + 0.5) / f32(screen_size.y)
+    );
+    
     var myRay: Ray;
-    myRay.direction = normalize(forwards + horizontal_coefficient * right + vertical_coefficient * up);
-    myRay.origin = scene.cameraPos;
-
-    // let pixel_color : vec3<f32> = rayColor(myRay);
+    myRay.direction = normalize((scene.lowerLeftCorner + uv.x * scene.horizontal + uv.y * scene.vertical) - scene.cameraOrigin);
+    myRay.origin = scene.cameraOrigin;
 
     let pixel_color : vec3<f32> = rayColor(myRay);
 
@@ -97,7 +95,7 @@ fn rayColor (ray: Ray) -> vec3<f32> {
         result = trace(temp_ray);
 
         //unpack color
-        color = color * result.color;
+        color = 0.5 * (result.color + color);
 
         //early exit
         if (!result.hit) {
@@ -107,11 +105,6 @@ fn rayColor (ray: Ray) -> vec3<f32> {
         //Set up for next trace
         temp_ray.origin = result.position;
         temp_ray.direction = normalize(reflect(temp_ray.direction, result.normal));
-    }
-
-    //Rays which reached terminal state and bounced indefinitely
-    if (result.hit) {
-        color = vec3(0.0, 0.0, 0.0);
     }
 
     return color;
@@ -235,23 +228,25 @@ fn hit_geometric_primitive(ray: Ray, primitive: GeometricPrimitive, tMin: f32, t
 
 fn hit_sphere(ray: Ray, sphere: Sphere, tMin: f32, tMax: f32, oldRenderState: RenderState) -> RenderState {
     
-    let co: vec3<f32> = ray.origin - sphere.center;
+    let oc: vec3<f32> = ray.origin - sphere.center;
     let a: f32 = dot(ray.direction, ray.direction);
-    let b: f32 = 2.0 * dot(ray.direction, co);
-    let c: f32 = dot(co, co) - sphere.radius * sphere.radius;
-    let discriminant: f32 = b * b - 4.0 * a * c;
+    let half_b: f32 = dot(ray.direction, oc);
+    let c: f32 = dot(oc, oc) - sphere.radius * sphere.radius;
+    let discriminant: f32 = half_b * half_b - a * c;
 
     var renderState: RenderState;
     renderState.color = oldRenderState.color;
 
     if (discriminant > 0.0) {
 
-        let t: f32 = (-b - sqrt(discriminant)) / (2 * a);
+        let t: f32 = (-half_b - sqrt(discriminant)) / a;
 
         if (t > tMin && t < tMax) {
-
+            // First set the position of the ray using the ray formular
             renderState.position = ray.origin + t * ray.direction;
-            renderState.normal = normalize(renderState.position - sphere.center);
+            // Get the normal
+            let outward_normal: vec3<f32> = (renderState.position - sphere.center) / sphere.radius;
+            renderState.normal = set_face_normal(ray, outward_normal);
             renderState.t = t;
             renderState.color = sphere.color;
             renderState.hit = true;
@@ -265,7 +260,6 @@ fn hit_sphere(ray: Ray, sphere: Sphere, tMin: f32, tMax: f32, oldRenderState: Re
 }
 
 fn hit_triangle(ray: Ray, tri: Triangle, tMin: f32, tMax: f32, oldRenderState: RenderState) -> RenderState {
-    
     //Set up a blank renderstate,
     //right now this hasn't hit anything
     var renderState: RenderState;
@@ -275,61 +269,87 @@ fn hit_triangle(ray: Ray, tri: Triangle, tMin: f32, tMax: f32, oldRenderState: R
     //Direction vectors
     let edge_ab: vec3<f32> = tri.corner_b - tri.corner_a;
     let edge_ac: vec3<f32> = tri.corner_c - tri.corner_a;
-    //Normal of the triangle
-    var n: vec3<f32> = normalize(cross(edge_ab, edge_ac));
-    var ray_dot_tri: f32 = dot(ray.direction, n);
-    //backface reversal
-    if (ray_dot_tri > 0.0) {
-        ray_dot_tri = ray_dot_tri * -1;
-        n = n * -1;
-    }
+
+    let h: vec3<f32> = cross(ray.direction, edge_ac);
+    let a: f32 =  dot(edge_ab, h);
+
     //early exit, ray parallel with triangle surface
-    if (abs(ray_dot_tri) < 0.00001) {
+    if (a > -0.0001 && a < 0.0001) {
         return renderState;
     }
 
-    var system_matrix: mat3x3<f32> = mat3x3<f32>(
-        ray.direction,
-        tri.corner_a - tri.corner_b,
-        tri.corner_a - tri.corner_c
-    );
-    let denominator: f32 = determinant(system_matrix);
-    if (abs(denominator) < 0.00001) {
-        return renderState;
-    }
-
-    system_matrix = mat3x3<f32>(
-        ray.direction,
-        tri.corner_a - ray.origin,
-        tri.corner_a - tri.corner_c
-    );
-    let u: f32 = determinant(system_matrix) / denominator;
+    let f: f32 = 1.0 / a;
+    let s: vec3<f32> = ray.origin - tri.corner_a;
+    let u: f32 = f * dot(s,h);
     
     if (u < 0.0 || u > 1.0) {
         return renderState;
     }
 
-    system_matrix = mat3x3<f32>(
-        ray.direction,
-        tri.corner_a - tri.corner_b,
-        tri.corner_a - ray.origin,
-    );
-    let v: f32 = determinant(system_matrix) / denominator;
+    let q: vec3<f32> = cross(s, edge_ab);
+    let v: f32 = f * dot(ray.direction, q);
+
     if (v < 0.0 || u + v > 1.0) {
         return renderState;
     }
 
-    system_matrix = mat3x3<f32>(
-        tri.corner_a - ray.origin,
-        tri.corner_a - tri.corner_b,
-        tri.corner_a - tri.corner_c
-    );
-    let t: f32 = determinant(system_matrix) / denominator;
+    let t: f32 = f * dot(edge_ac, q);
+
+    // //Normal of the triangle
+    // var n: vec3<f32> = normalize(cross(edge_ab, edge_ac));
+    // var ray_dot_tri: f32 = dot(ray.direction, n);
+    // //backface reversal
+    // if (ray_dot_tri > 0.0) {
+    //     ray_dot_tri = ray_dot_tri * -1;
+    //     n = n * -1;
+    // }
+    // //early exit, ray parallel with triangle surface
+    // if (abs(ray_dot_tri) < 0.00001) {
+    //     return renderState;
+    // }
+
+    // var system_matrix: mat3x3<f32> = mat3x3<f32>(
+    //     ray.direction,
+    //     tri.corner_a - tri.corner_b,
+    //     tri.corner_a - tri.corner_c
+    // );
+    // let denominator: f32 = determinant(system_matrix);
+    // if (abs(denominator) < 0.00001) {
+    //     return renderState;
+    // }
+
+    // system_matrix = mat3x3<f32>(
+    //     ray.direction,
+    //     tri.corner_a - ray.origin,
+    //     tri.corner_a - tri.corner_c
+    // );
+    // let u: f32 = determinant(system_matrix) / denominator;
+    
+    // if (u < 0.0 || u > 1.0) {
+    //     return renderState;
+    // }
+
+    // system_matrix = mat3x3<f32>(
+    //     ray.direction,
+    //     tri.corner_a - tri.corner_b,
+    //     tri.corner_a - ray.origin,
+    // );
+    // let v: f32 = determinant(system_matrix) / denominator;
+    // if (v < 0.0 || u + v > 1.0) {
+    //     return renderState;
+    // }
+
+    // system_matrix = mat3x3<f32>(
+    //     tri.corner_a - ray.origin,
+    //     tri.corner_a - tri.corner_b,
+    //     tri.corner_a - tri.corner_c
+    // );
+    // let t: f32 = determinant(system_matrix) / denominator;
 
     if (t > tMin && t < tMax) {
 
         renderState.position = ray.origin + t * ray.direction;
-        renderState.normal = n;
+        renderState.normal = normalize(cross(edge_ab, edge_ac));
         renderState.color = tri.color;
         renderState.t = t;
         renderState.hit = true;
@@ -354,5 +374,18 @@ fn hit_aabb(ray: Ray, node: Node) -> f32 {
     }
     else {
         return t_min;
+    }
+}
+
+fn set_face_normal(ray: Ray, outward_normal: vec3<f32>) -> vec3<f32> {
+    // Sets the hit record normal vector.
+    // NOTE: the parameter `outward_normal` is assumed to have unit length.
+
+    let front_face: bool = dot(ray.direction, outward_normal) < 0;
+
+    if (front_face) {
+        return outward_normal;
+    } else {
+        return -outward_normal;
     }
 }

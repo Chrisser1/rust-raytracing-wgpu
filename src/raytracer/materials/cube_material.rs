@@ -1,5 +1,4 @@
-use wgpu::{core::device::queue, util::DeviceExt, TextureDescriptor};
-use image::{DynamicImage, Rgba};
+use image::DynamicImage;
 
 pub struct CubeMapMaterial {
     texture: wgpu::Texture,
@@ -76,8 +75,10 @@ impl CubeMapMaterial {
             address_mode_v: wgpu::AddressMode::Repeat,
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear, // Adjust based on mipmapping usage
+            lod_min_clamp: 0.0, // Optional: Adjust based on usage
+            lod_max_clamp: std::f32::MAX, // Optional: Adjust based on usage
             ..Default::default()
         });
 

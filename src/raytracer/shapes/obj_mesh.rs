@@ -1,5 +1,3 @@
-use wgpu::Buffer;
-use std::path::Path;
 use std::fs;
 use super::{Vec3, Vec2, Triangle};
 
@@ -108,10 +106,9 @@ impl ObjMesh {
     fn read_corner(&mut self, vertex_description: &str) -> Vec3 {
         let v_vt_vn: Vec<&str> = vertex_description.split('/').collect();
         let v = self.v[v_vt_vn[0].parse::<usize>().unwrap() - 1];
-        let vt = self.vt[v_vt_vn[1].parse::<usize>().unwrap() - 1];
-        let vn =self.vn[v_vt_vn[2].parse::<usize>().unwrap() - 1];
+        // let vt = self.vt[v_vt_vn[1].parse::<usize>().unwrap() - 1];
+        // let vn =self.vn[v_vt_vn[2].parse::<usize>().unwrap() - 1];
 
-        // println!("v: ({}, {}, {}) - vt: ({}, {}) - vn: ({}, {}, {})", v.0, v.1, v.2, vt.0, vt.1, vn.0, vn.1, vn.2);
         return v;
     }
 }

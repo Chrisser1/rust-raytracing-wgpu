@@ -1,27 +1,24 @@
 
 use image::DynamicImage;
-use wgpu::{naga::back::msl::sampler, util::DeviceExt, BufferBinding, BufferUsages, Extent3d, MultisampleState, Sampler, TextureView};
+use wgpu::{BufferBinding, BufferUsages, Sampler, TextureView};
 use winit::{
     dpi::PhysicalSize, 
-    event::{ElementState, Event, KeyEvent, WindowEvent}, 
-    event_loop::EventLoopBuilder, keyboard::{KeyCode, PhysicalKey}, 
-    window::{Window, WindowBuilder}
+    window::Window
 };
 
-use std::fs;
 use std::path::Path;
 use image::io::Reader as ImageReader;
 
 use super::{CubeMapMaterial, Scene};
 
-struct State<'a> {
+pub struct State<'a> {
     // Device/Context objects
     surface: wgpu::Surface<'a>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    size: PhysicalSize<u32>,
-    window: &'a Window,
+    pub size: PhysicalSize<u32>,
+    pub window: &'a Window,
 
     // Assets
     color_buffer: wgpu::Texture,
@@ -40,12 +37,12 @@ struct State<'a> {
     screen_bind_group: wgpu::BindGroup,
 
     // Scene to render
-    scene: Scene,
+    pub scene: Scene,
 }
 
 impl<'a> State<'a> {
 
-    async fn new(window: &'a Window, scene: Scene) -> Self {
+    pub async fn new(window: &'a Window, scene: Scene) -> Self {
 
         let size = window.inner_size();
 
@@ -64,40 +61,9 @@ impl<'a> State<'a> {
         let adapter = instance.request_adapter(&adapter_descriptor)
             .await.unwrap();
 
-        let device_descriptor = wgpu::DeviceDescriptor {
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            label: Some("Device"),
-        };
-        let (device, queue) = adapter
-            .request_device(&device_descriptor, None)
-            .await.unwrap();
+        let (device, queue) = init_device_and_queue(&adapter).await;
 
-        let surface_capabilities = surface.get_capabilities(&adapter);
-
-        // Prefer Immediate mode for lower latency, but fall back to Fifo if not supported.
-        let present_mode = if surface_capabilities.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo // Guaranteed to be supported
-        };
-        let surface_format = surface_capabilities
-            .formats
-            .iter()
-            .copied()
-            .filter(|f | f.is_srgb())
-            .next()
-            .unwrap_or(surface_capabilities.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: present_mode,
-            alpha_mode: surface_capabilities.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2
-        };
+        let config = init_surface_configuration(&adapter, &surface, &size);
         surface.configure(&device, &config);
 
         // Create assets to be used
@@ -149,7 +115,7 @@ impl<'a> State<'a> {
         }
     }
 
-    fn resize(&mut self, new_size: PhysicalSize<u32>) {
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
@@ -158,7 +124,7 @@ impl<'a> State<'a> {
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError>{
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError>{
         
         self.prepare_scene();
         
@@ -264,12 +230,97 @@ impl<'a> State<'a> {
     }
 }
 
+// ----------Initialization Functions---------- //
+async fn init_device_and_queue(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {
+    let device_descriptor = wgpu::DeviceDescriptor {
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        label: Some("Device"),
+    };
+    adapter.request_device(&device_descriptor, None).await.unwrap()
+}
+
+fn init_surface_configuration(adapter: &wgpu::Adapter, surface: &wgpu::Surface, size: &PhysicalSize<u32>) -> wgpu::SurfaceConfiguration {
+    let surface_capabilities = surface.get_capabilities(adapter);
+    
+    let present_mode = if surface_capabilities.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox // Triple buffering if available
+    } else if surface_capabilities.present_modes.contains(&wgpu::PresentMode::Fifo) {
+        wgpu::PresentMode::Fifo // V-Sync (Double Buffering)
+    } else {
+        wgpu::PresentMode::Immediate // For the lowest latency, might introduce tearing
+    };
+
+    let surface_format = surface_capabilities
+        .formats
+        .iter()
+        .copied()
+        .filter(|f | f.is_srgb())
+        .next()
+        .unwrap_or(surface_capabilities.formats[0]);
+
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: size.width,
+        height: size.height,
+        present_mode: present_mode,
+        alpha_mode: surface_capabilities.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2
+    }
+}
+
+// ----------Asset Creation Functions---------- //
 async fn create_assets(
     device: &wgpu::Device,
     size: &winit::dpi::PhysicalSize<u32>,
     scene: &Scene,
     queue: &wgpu::Queue,
 ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, CubeMapMaterial) {
+
+    let (color_buffer, color_buffer_view) = create_color_buffer(device, size);
+
+    let sampler_descriptor = wgpu::SamplerDescriptor {
+        label: Some("Sampler Descriptor"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        lod_min_clamp: 0.0,
+        lod_max_clamp: f32::MAX,
+        compare: None,
+        anisotropy_clamp: 1,
+        border_color: None,
+    };
+
+    let sampler = device.create_sampler(&sampler_descriptor);
+
+    let scene_parameters = create_scene_parameters(device).await;
+
+    let object_buffer = create_object_buffer(device, scene).await;
+
+    let node_buffer = create_node_buffer(device, scene).await;
+
+    let object_index_buffer = create_object_index_buffer(device, scene).await;
+
+    let paths = vec![
+        "assets/gfx/sky_right.png",
+        "assets/gfx/sky_left.png",
+        "assets/gfx/sky_bottom.png", // 3 is bottom
+        "assets/gfx/sky_top.png",
+        "assets/gfx/sky_back.png",
+        "assets/gfx/sky_front.png",
+    ];
+    let images:Vec<DynamicImage> = load_cube_map_images(paths);
+    let sky_material: CubeMapMaterial = CubeMapMaterial::new(device, queue, images);
+    // Return the created resources
+    (color_buffer, color_buffer_view, sampler, scene_parameters, object_buffer, node_buffer, object_index_buffer, sky_material)
+} 
+
+fn create_color_buffer(device: &wgpu::Device, size: &PhysicalSize<u32>) -> (wgpu::Texture, wgpu::TextureView) {
     let color_buffer_description = wgpu::TextureDescriptor {
         label: Some("Color Buffer Description"),
         size: wgpu::Extent3d {
@@ -298,70 +349,49 @@ async fn create_assets(
     };
 
     let color_buffer_view = color_buffer.create_view(&color_buffer_view_description);
+    (color_buffer, color_buffer_view)
+}
 
-    let sampler_descriptor = wgpu::SamplerDescriptor {
-        label: Some("Sampler Descriptor"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        address_mode_w: wgpu::AddressMode::Repeat,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Nearest,
-        mipmap_filter: wgpu::FilterMode::Nearest,
-        lod_min_clamp: 0.0,
-        lod_max_clamp: f32::MAX,
-        compare: None,
-        anisotropy_clamp: 1,
-        border_color: None,
-    };
-
-    let sampler = device.create_sampler(&sampler_descriptor);
-
-    let parameter_buffer_descriptor = wgpu::BufferDescriptor {
-        label: Some("Parameter Buffer Descriptor"),
-        size: 64,
-        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+async fn create_scene_parameters(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Scene Parameters Buffer"),
+        size: 80,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
-    };
-    let scene_parameters = device.create_buffer(&parameter_buffer_descriptor);
+    })
+}
 
+async fn create_object_buffer(device: &wgpu::Device, scene: &Scene) -> wgpu::Buffer {
     let object_buffer_descriptor = wgpu::BufferDescriptor {
         label: Some("Object Buffer Descriptor"),
         size: 84 * scene.objects.len() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
-    let object_buffer = device.create_buffer(&object_buffer_descriptor);
+    device.create_buffer(&object_buffer_descriptor)
+}
 
+async fn create_node_buffer(device: &wgpu::Device, scene: &Scene) -> wgpu::Buffer {
     let node_buffer_descriptor = wgpu::BufferDescriptor {
         label: Some("Node Buffer Descriptor"),
-        size: 32u64 * (scene.nodes_used as u64),
+        size: 32 * (scene.nodes_used as u64),
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
-    let node_buffer = device.create_buffer(&node_buffer_descriptor);
+    device.create_buffer(&node_buffer_descriptor)
+}
 
+async fn create_object_index_buffer(device: &wgpu::Device, scene: &Scene) -> wgpu::Buffer {
     let object_index_buffer_descriptor = wgpu::BufferDescriptor {
         label: Some("Object Buffer Descriptor"),
         size: 4 * scene.objects.len() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
-    let object_index_buffer = device.create_buffer(&object_index_buffer_descriptor);
+    device.create_buffer(&object_index_buffer_descriptor)
+}
 
-    let paths = vec![
-        "assets/gfx/sky_front.png",
-        "assets/gfx/sky_back.png",
-        "assets/gfx/sky_left.png",
-        "assets/gfx/sky_right.png",
-        "assets/gfx/sky_bottom.png",
-        "assets/gfx/sky_top.png",
-    ];
-    let images:Vec<DynamicImage> = load_cube_map_images(paths);
-    let sky_material: CubeMapMaterial = CubeMapMaterial::new(device, queue, images);
-    // Return the created resources
-    (color_buffer, color_buffer_view, sampler, scene_parameters, object_buffer, node_buffer, object_index_buffer, sky_material)
-} 
-
+// ----------Pipeline and bind group Creation Functions---------- //
 async fn make_bind_group_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
     // ----------Ray tracing bind group---------- //
     let ray_tracing_bind_group_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
@@ -558,37 +588,38 @@ async fn make_pipeline(
     screen_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> (wgpu::ComputePipeline, wgpu::RenderPipeline) {
     // ----------Ray tracing pipeline---------- //
-    let ray_tracing_pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
-        label: Some("Ray Tracing Pipeline Layout"),
-        bind_group_layouts: &[&ray_tracing_bind_group_layout],
-        push_constant_ranges: &[], // No push constants used,
-    };
-    let ray_tracing_pipeline_layout = device.create_pipeline_layout(&ray_tracing_pipeline_layout_descriptor);
+    let ray_tracing_pipeline = create_ray_compute_pipeline(device, ray_tracing_bind_group_layout);
+
+    // ----------Screen/render pipeline---------- //
+    let screen_pipeline = create_screen_pipeline(device, screen_bind_group_layout);
+
+    // Return the created resources
+    (ray_tracing_pipeline, screen_pipeline)
+}
+
+fn create_ray_compute_pipeline(device: &wgpu::Device, bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
+    let pipeline_layout = create_pipeline_layout(device, bind_group_layout);
 
     // Create the shader module
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Ray Tracing Shader Module"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/raytracer_kernel.wgsl").into()),
-        });
+        label: Some("Tracing Shader Module"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/raytracer_kernel.wgsl").into()),
+    });
 
     // Define the compute pipeline descriptor with the shader module and entry point
-    let ray_tracing_pipeline_descriptor = wgpu::ComputePipelineDescriptor {
-        label: Some("Ray Pipeline Descriptor"),
-        layout: Some(&ray_tracing_pipeline_layout),
+    let pipeline_descriptor = wgpu::ComputePipelineDescriptor {
+        label: Some("Pipeline Descriptor"),
+        layout: Some(&pipeline_layout),
         module: &shader_module,
         entry_point: "main", // Entry point in the shader
     };
 
     // Create the compute pipeline
-    let ray_tracing_pipeline = device.create_compute_pipeline(&ray_tracing_pipeline_descriptor);
+    device.create_compute_pipeline(&pipeline_descriptor)
+}
 
-    // ----------Screen pipeline---------- //
-    let screen_pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
-        label: Some("Screen Pipeline Layout"),
-        bind_group_layouts: &[&screen_bind_group_layout],
-        push_constant_ranges: &[], // No push constants used,
-    };
-    let screen_pipeline_layout = device.create_pipeline_layout(&screen_pipeline_layout_descriptor);
+fn create_screen_pipeline(device: &wgpu::Device, bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+    let pipeline_layout = create_pipeline_layout(device, bind_group_layout);
 
     // Vertex shader module
     let vertex_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -603,9 +634,9 @@ async fn make_pipeline(
     });
 
     // Define the render pipeline descriptor
-    let screen_pipeline_descriptor = wgpu::RenderPipelineDescriptor {
+    let pipeline_descriptor = wgpu::RenderPipelineDescriptor {
         label: Some("Screen Pipeline Descriptor"),
-        layout: Some(&screen_pipeline_layout),
+        layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &vertex_shader_module,
             entry_point: "vert_main",
@@ -633,11 +664,15 @@ async fn make_pipeline(
         multiview: None,
     };
 
-    // Create the render pipeline
-    let screen_pipeline = device.create_render_pipeline(&screen_pipeline_descriptor);
+    device.create_render_pipeline(&pipeline_descriptor)
+}
 
-    // Return the created resources
-    (ray_tracing_pipeline, screen_pipeline)
+fn create_pipeline_layout(device: &wgpu::Device, bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Pipeline Layout"),
+        bind_group_layouts: &[bind_group_layout],
+        push_constant_ranges: &[],
+    })
 }
 
 fn load_cube_map_images(paths: Vec<&str>) -> Vec<DynamicImage> {
@@ -647,86 +682,4 @@ fn load_cube_map_images(paths: Vec<&str>) -> Vec<DynamicImage> {
             .decode()
             .expect("Failed to decode image")
     }).collect()
-}
-
-#[derive(Debug, Clone, Copy)]
-enum CustomEvent {
-    Timer,
-}
-
-pub async fn run() {
-    env_logger::init();
-
-    let event_loop = EventLoopBuilder::<CustomEvent>::with_user_event()
-        .build()
-        .unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
-    let event_loop_proxy = event_loop.create_proxy();
-
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(17));
-        event_loop_proxy.send_event(CustomEvent::Timer).ok();
-    });
-
-    let mut program_state: State<'_> = State::new(&window, Scene::new(100, 10)).await;
-
-    event_loop.run(move | event, elwt | match event {
-        Event::UserEvent(..) => {
-            program_state.window.request_redraw();
-            program_state.scene.update();
-        },
-
-        Event::WindowEvent { window_id, ref event } if window_id == program_state.window.id() => match event {
-            WindowEvent::Resized(physical_size) => program_state.resize(*physical_size),
-
-            WindowEvent::CloseRequested 
-            | WindowEvent::KeyboardInput { 
-                event: 
-                    KeyEvent { 
-                        physical_key: PhysicalKey::Code(KeyCode::Escape), 
-                        state: ElementState::Pressed, repeat: false, .. }, .. } => {
-                println!("Goodbye see you!");
-                elwt.exit();
-            }
-
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        physical_key,
-                        state,
-                        ..
-                    },
-                ..
-            } => {
-                let key_code = match physical_key {
-                    PhysicalKey::Code(code) => Some(code),
-                    _ => None,
-                };
-                match state {
-                    ElementState::Pressed => {
-                        if let Some(code) = key_code {
-                            program_state.scene.keys_pressed.insert(*code);
-                        }
-                    },
-                    ElementState::Released => {
-                        if let Some(code) = key_code {
-                            program_state.scene.keys_pressed.remove(&code);
-                        }
-                    },
-                }
-            },                    
-
-            WindowEvent::RedrawRequested => match program_state.render() {
-                Ok(_) => {},
-                Err(wgpu::SurfaceError::Lost) => program_state.resize(program_state.size),
-                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                Err(e) => eprintln!("{:?}", e),
-            }
-
-            _ => (),
-
-        },
-
-        _ => {},
-    }).expect("Error!");
 }

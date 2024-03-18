@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use rand::Rng;
 use winit::keyboard::KeyCode;
 
-use super::{Camera, Node, ObjMesh, Sphere, Triangle, Vec3}; // Import the Rng trait to use random number generation methods
+use super::{Camera, Node, ObjMesh, Sphere, Square, Triangle, Vec3}; // Import the Rng trait to use random number generation methods
 
 pub enum Object {
     Sphere(Sphere),
@@ -18,22 +18,24 @@ pub struct Scene {
     pub object_indices: Vec<usize>,
     pub max_bounces: usize,
     pub keys_pressed: HashSet<KeyCode>,
-    pub object_meshes: Vec<ObjMesh>,
 }
 
 impl Scene {
-    pub fn new(object_count: usize, max_bounces: usize) -> Self {
-        let mut scene = Self {
-            objects: Vec::with_capacity(object_count),
-            camera: Camera::new(Vec3(-5.0, 0.0, 0.0)),
-            nodes: Vec::with_capacity(2 * object_count - 1),
+    // Initialize an empty scene
+    pub fn new(max_bounces: usize, width: f32, height: f32) -> Self {
+        Self {
+            objects: Vec::new(),
+            camera: Camera::new(Vec3(0.0, 0.0, -3.0), Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), 90.0, width/height),
+            nodes: Vec::new(),
             nodes_used: 0,
-            object_indices: Vec::with_capacity(object_count),
-            max_bounces: max_bounces,
+            object_indices: Vec::new(),
+            max_bounces,
             keys_pressed: HashSet::new(),
-            object_meshes: Vec::new(),
-        };
+        }
+    }
 
+    /// Method to build a circle of triangles and circles
+    pub fn make_simple_world(&mut self, object_count: usize) {
         let golden_angle = std::f32::consts::PI * (3.0 - (5.0_f32).sqrt()); // Golden angle in radians
         let radius = 50.0; // Radius of the imaginary sphere on which to place the spheres
 
@@ -57,7 +59,7 @@ impl Scene {
                 // Add a sphere...
                 let sphere_radius = 0.1 + 1.9 * rng.gen::<f32>(); // Random sphere radius
                 let sphere = Sphere::new(center, color, sphere_radius);
-                scene.objects.push(Object::Sphere(sphere));
+                self.objects.push(Object::Sphere(sphere));
             } else {
                 // Add a triangle...
                 let offsets = [
@@ -66,26 +68,38 @@ impl Scene {
                 Vec3(-3.0 + 6.0 * rng.gen::<f32>(), -3.0 + 6.0 * rng.gen::<f32>(), -3.0 + 6.0 * rng.gen::<f32>())
                 ];
                 let triangle = Triangle::build_from_center_and_offsets(center, offsets, color);
-                scene.objects.push(Object::Triangle(triangle));
+                self.objects.push(Object::Triangle(triangle));
             }
         }
-
-
-        // build the scene
-        scene.make_scene();
-
-        scene
     }
 
-    fn make_scene(&mut self) {
-        self.object_meshes.push(ObjMesh::new(Vec3(1.0, 1.0, 1.0), "assets/models/statue.obj"));
+    /// Method to add a Sphere to the scene
+    pub fn add_sphere(&mut self, center: Vec3, color: Vec3, radius: f32) {
+        let sphere = Sphere::new(center, color, radius);
+        self.objects.push(Object::Sphere(sphere));
+    }
 
-        for objects in &self.object_meshes {
-            for triangle in &objects.triangles {
-                self.objects.push(Object::Triangle(triangle.clone()));
-            }
+    /// Method to add a Triangle to the scene
+    pub fn add_triangle(&mut self, corners: [Vec3; 3], color: Vec3) {
+        let triangle = Triangle::build_from_corners(corners, color);
+        self.objects.push(Object::Triangle(triangle));
+    }
+
+    /// Method to add a mesh to the scene
+    pub fn add_square(&mut self, center: Vec3, height: f32, width: f32, color: Vec3, orientation: f32) {
+        for triangle in Square::new(center, height, width, color, orientation).triangles {
+            self.objects.push(Object::Triangle(triangle));
         }
+    }
 
+    /// Method to add a mesh to the scene
+    pub fn add_object_mesh(&mut self, path: &str) {
+        for triangle in ObjMesh::new(Vec3(1.0, 1.0, 1.0), path).triangles {
+            self.objects.push(Object::Triangle(triangle));
+        }
+    }
+
+    pub fn make_scene(&mut self) {
         // Initialize object indices for easy tracking
         self.object_indices = (0..self.objects.len()).collect();
 
@@ -110,6 +124,10 @@ impl Scene {
 
     fn update_bounds(&mut self, node_index: usize) {
         let node = &mut self.nodes[node_index];
+
+        // Reset bounds to extreme values
+        node.min_corner = Vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        node.max_corner = Vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
 
         let start_index = node.left_child as usize;
         let end_index = start_index + node.object_count as usize;
@@ -155,7 +173,7 @@ impl Scene {
         let axis = self.longest_axis(node_index);
         let (split, i) = self.median_split(node_index, axis);
 
-        if (split == 0 || split == self.nodes[node_index].object_count as usize) {
+        if split == 0 || split == self.nodes[node_index].object_count as usize {
             return;
         }
 
@@ -243,22 +261,23 @@ impl Scene {
     }
 
     pub fn flatten_scene_data(&self) -> Vec<u8> {
-        let scene_data_flat: [f32; 16] = [
-            self.camera.position.0,
-            self.camera.position.1,
-            self.camera.position.2,
+        let scene_data_flat: [f32; 17] = [
+            self.camera.origin.0,
+            self.camera.origin.1,
+            self.camera.origin.2,
             0.0, // Padding for alignment
-            self.camera.forwards.0,
-            self.camera.forwards.1,
-            self.camera.forwards.2,
+            self.camera.lower_left_corner.0,
+            self.camera.lower_left_corner.1,
+            self.camera.lower_left_corner.2,
             0.0, // Padding for alignment
-            self.camera.right.0,
-            self.camera.right.1,
-            self.camera.right.2,
+            self.camera.horizontal.0,
+            self.camera.horizontal.1,
+            self.camera.horizontal.2,
+            0.0, // Padding for alignment
+            self.camera.vertical.0,
+            self.camera.vertical.1,
+            self.camera.vertical.2,
             self.max_bounces as f32,
-            self.camera.up.0,
-            self.camera.up.1,
-            self.camera.up.2,
             self.object_indices.len() as f32,
         ];
 
@@ -329,7 +348,7 @@ impl Scene {
     }
 
     pub fn update(&mut self) {
-        let movement_speed = 0.1; // Adjust speed as necessary
+        let movement_speed = 0.01; // Adjust speed as necessary
         for key in self.keys_pressed.iter() {
             match key {
                 KeyCode::KeyW => self.camera.move_forwards(movement_speed),
@@ -340,13 +359,12 @@ impl Scene {
                 KeyCode::KeyE => self.camera.move_horizontal(movement_speed),
                 KeyCode::Space => self.camera.move_horizontal(-movement_speed),
                 KeyCode::ShiftLeft => self.camera.move_horizontal(movement_speed),
-                KeyCode::ArrowLeft => self.camera.rotate_yaw(movement_speed*4.0),
-                KeyCode::ArrowRight => self.camera.rotate_yaw(-movement_speed*4.0),
-                KeyCode::ArrowUp => self.camera.rotate_pitch(-movement_speed*4.0),
-                KeyCode::ArrowDown => self.camera.rotate_pitch(movement_speed*4.0),
+                KeyCode::ArrowLeft => self.camera.rotate_yaw(1.0),
+                KeyCode::ArrowRight => self.camera.rotate_yaw(-1.0),
+                KeyCode::ArrowUp => self.camera.rotate_pitch(1.0),
+                KeyCode::ArrowDown => self.camera.rotate_pitch(-1.0),
                 _ => {},
             }
         }
     }
-    
 }
